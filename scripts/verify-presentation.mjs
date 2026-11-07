@@ -1,0 +1,68 @@
+import assert from 'node:assert/strict';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { resolve } from 'node:path';
+const latest = JSON.parse(await readFile('data/demo/latest.json','utf8'));
+const manifest = JSON.parse(await readFile(resolve(latest.directory,'private-manifest.json'),'utf8'));
+const base = manifest.base;
+const tabs = await (await fetch('http://127.0.0.1:9333/json')).json();
+const ws = new WebSocket(tabs.find(t=>t.type==='page').webSocketDebuggerUrl);
+await new Promise(r=>ws.addEventListener('open',r,{once:true}));
+let seq=0; const waiting=new Map(); const errors=[];
+ws.addEventListener('message',e=>{const m=JSON.parse(e.data);if(m.id){const p=waiting.get(m.id);waiting.delete(m.id);m.error?p.reject(Error(m.error.message)):p.resolve(m.result);}if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails.text);});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const id=++seq;waiting.set(id,{resolve,reject});ws.send(JSON.stringify({id,method,params}));});
+const evaluate=async(expression)=>{const r=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)throw Error(r.exceptionDetails.exception?.description||r.exceptionDetails.text);return r.result.value;};
+const until=async(expression)=>{for(let n=0;n<600;n++){if(await evaluate(`!!(${expression})`))return;await new Promise(r=>setTimeout(r,100));}throw Error('页面等待超时：'+expression);};
+const click=async(text)=>{assert.ok(await evaluate(`(()=>{const e=[...document.querySelectorAll('button,a')].find(e=>e.textContent.trim()===${JSON.stringify(text)});if(!e)return false;e.click();return true})()`),'缺少按钮 '+text);};
+const api=async(client,path,method='GET',body)=>{const r=await fetch(base+'/api'+path,{method,headers:{cookie:client.cookie,origin:base,'x-csrf-token':client.csrf,'content-type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});const d=await r.json();assert.ok(r.ok,path+': '+JSON.stringify(d));return d;};
+const login=async(role)=>{const a=manifest.accounts[role];const r=await fetch(base+'/api/login',{method:'POST',headers:{origin:base,'content-type':'application/json'},body:JSON.stringify({email:a.email,password:a.password})});assert.equal(r.status,200);return {...await r.json(),cookie:r.headers.get('set-cookie').split(';')[0]};};
+await send('Page.enable');await send('Runtime.enable');await send('Network.enable');
+await mkdir('data/qa/p1',{recursive:true});
+const engineer=await login('engineer');
+const navigate=async(role)=>{const c=role==='engineer'?engineer:await login(role);await send('Network.setCookie',{url:base,name:'sp_session',value:c.cookie.slice('sp_session='.length)});await send('Page.navigate',{url:base});await until(`document.body.innerText.includes('欢迎回来')`);};
+const openCase=async(key)=>{const title=manifest.proposals[key].title;await until(`document.body.innerText.includes(${JSON.stringify(title)})`);await evaluate(`(()=>{const row=[...document.querySelectorAll('tr')].find(e=>e.innerText.includes(${JSON.stringify(title)}));row.querySelector('button').click()})()`);await until(`document.body.innerText.includes('阅读预览')`);};
+const screenshot=async(name)=>{const s=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});await writeFile(`data/qa/p1/${name}.png`,Buffer.from(s.data,'base64'));};
+try {
+ await send('Emulation.setDeviceMetricsOverride',{width:1366,height:900,deviceScaleFactor:1,mobile:false});
+ await navigate('engineer');await openCase('approved');
+ assert.ok(await evaluate(`document.querySelector('[aria-label="审批流程"]').innerText.includes('已批准')`));
+ await screenshot('approved-desktop');
+ await click('阅读预览 ↗');await until(`document.querySelector('dialog[open] .reader-cover')`);
+ assert.ok(await evaluate(`document.querySelector('dialog[open]').innerText.includes('客户需求与产品匹配')`));
+ await screenshot('reader');
+ await click('定位原文 ↗');await until(`document.querySelector('dialog[open] mark')`);
+ assert.ok(await evaluate(`document.querySelector('mark').innerText.length>4`));
+ await screenshot('source-highlight');
+ await evaluate(`document.querySelectorAll('dialog[open]')[1].querySelector('button').click()`);
+ assert.equal(await evaluate(`document.querySelectorAll('dialog[open]').length`),1);
+ await evaluate(`document.querySelector('dialog[open]').querySelector('button').click()`);
+ await navigate('engineer');await openCase('blocked');
+ await until(`document.querySelector('[aria-label="送审预检摘要"]').innerText.includes('待处理')`);
+ await click('前往处理 →');
+ assert.ok(await evaluate(`document.activeElement.id==='matching-editor'`));
+ await screenshot('blocked-precheck');
+ await navigate('engineer');await openCase('live');
+ const history=await evaluate(`(()=>{const s=[...document.querySelectorAll('summary')].find(e=>e.textContent.includes('修订历史'));s.click();return s.parentElement.querySelector('button').textContent})()`);
+ await click(history.trim());await until(`document.querySelector('dialog[open] .reader-cover')?.innerText.includes('历史留存快照')`);
+ await screenshot('history');await evaluate(`document.querySelector('dialog[open]').querySelector('button').click()`);
+ for(const role of ['chemist','compliance','leader']){await navigate(role);await openCase('pending');assert.ok(await evaluate(`document.querySelector('[aria-label="审批流程"]').innerText.includes('待审核')`));}
+ await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});await navigate('engineer');await openCase('live');
+ assert.ok(await evaluate(`document.documentElement.scrollWidth <= window.innerWidth+1`),'移动屏幕横向溢出');await screenshot('mobile');
+ await send('Emulation.setDeviceMetricsOverride',{width:1920,height:1080,deviceScaleFactor:1,mobile:false});await navigate('engineer');await openCase('live');
+ const p=await api(engineer,`/proposals/${manifest.proposals.live.id}`);
+ let jobs=await api(engineer,`/proposals/${p.id}/jobs`);
+ let job=jobs.find(j=>j.status==='completed' && j.revision===p.revision);
+ if(!job){
+   assert.equal(process.env.VERIFY_PRESENTATION_ALLOW_MODEL_CALLS,'1','当前副本没有同修订的可用候选；本次检查不会自动发起付费模型调用。需要真实生成时显式设置VERIFY_PRESENTATION_ALLOW_MODEL_CALLS=1。');
+   const docs=await api(engineer,`/documents?proposalId=${p.id}`);
+   const source=docs.find(d=>d.kind==='tds'&&d.allow_model&&d.status==='published');
+   job=await api(engineer,`/proposals/${p.id}/jobs`,'POST',{requestKey:crypto.randomUUID(),expectedRevision:p.revision,sectionIndex:2,versionIds:[source.version_id],consent:true,instruction:'仅供合成演示，约300字，清晰区分已知与待验证；引用完整来源原文，start为0。'});
+ }
+ await click('刷新');
+ await until(`document.querySelector('.ai-job button')`);await click('产品推荐与匹配依据');
+ await until(`document.body.innerText.includes('展开阅读与正文对照')`);
+ await click('展开阅读与正文对照 ↗');await until(`document.querySelector('.candidate-comparison')`);
+ assert.equal(await evaluate(`document.querySelectorAll('.candidate-comparison>div').length`),2);await screenshot('ai-comparison');
+ assert.deepEqual(errors,[],'浏览器运行异常');
+ await writeFile('data/qa/p1/result.json',JSON.stringify({passed:true,checks:['批准进度','整篇阅读','嵌套原文高亮','预检定位','历史阅读','三角色待审批','移动屏幕无横向溢出','真实候选对照'],screens:[1366,390,1920]},null,2));
+ console.log('五项P1浏览器交互检查通过，截图保存至data/qa/p1');
+} finally { ws.close(); }

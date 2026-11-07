@@ -1,0 +1,47 @@
+{
+  "name": "ai-sales-plan",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k \"node --import tsx --watch server/index.ts\" \"vite --host 127.0.0.1 --configLoader runner\"",
+    "build": "tsc --noEmit && vite build --configLoader runner",
+    "start": "node --import tsx server/index.ts",
+    "db:check": "node --import tsx scripts/db.ts check",
+    "db:migrate": "node --import tsx scripts/db.ts migrate",
+    "db:bootstrap": "node --import tsx scripts/db.ts bootstrap",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "eval:pcba": "node --import tsx scripts/evaluate-pcba.ts",
+    "poc:pcba": "node --import tsx scripts/verify-pcba-pi.ts"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-durable": "1.4.0",
+    "docx": "9.5.1",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "helmet": "^8.1.0",
+    "jszip": "^3.10.2",
+    "mammoth": "^1.13.0",
+    "mysql2": "^3.15.3",
+    "pdf-parse": "^2.4.5",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.19.0",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.0.4",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.12"
+  }
+}
